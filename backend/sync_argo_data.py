@@ -68,19 +68,36 @@ def build_erddap_url(start_time: datetime, end_time: datetime) -> str:
     )
 
 
-def fetch_argo_data(start_time: datetime, end_time: datetime) -> pd.DataFrame:
+def fetch_argo_data(
+    start_time: datetime, end_time: datetime, max_retries: int = 3, retry_delay_seconds: int = 30
+) -> pd.DataFrame:
     url = build_erddap_url(start_time, end_time)
     print(f"Fetching ARGO data from {start_time} to {end_time}...")
-    response = requests.get(url, verify=False, timeout=180)
 
-    if response.status_code != 200:
-        # ERDDAP returns 404 when a query matches zero rows — not a real error.
+    response = None
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        response = requests.get(url, verify=False, timeout=180)
+
+        if response.status_code == 200:
+            break
+
         if response.status_code == 404:
+            # ERDDAP returns 404 when a query matches zero rows — not a real error, don't retry.
             print("No new records found in this window.")
             return pd.DataFrame()
-        raise RuntimeError(
-            f"ERDDAP request failed: {response.status_code} — {response.text[:300]}"
-        )
+
+        # 5xx errors are typically transient (maintenance, overload) — worth retrying.
+        last_error = f"{response.status_code} — {response.text[:300]}"
+        if attempt < max_retries:
+            print(
+                f"  Attempt {attempt}/{max_retries} failed ({response.status_code}). "
+                f"Retrying in {retry_delay_seconds}s..."
+            )
+            time.sleep(retry_delay_seconds)
+
+    if response is None or response.status_code != 200:
+        raise RuntimeError(f"ERDDAP request failed after {max_retries} attempts: {last_error}")
 
     lines = response.text.split("\n")
     clean = "\n".join([lines[0]] + lines[2:])  # drop ERDDAP's units row
