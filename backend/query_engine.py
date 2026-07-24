@@ -59,13 +59,24 @@ Columns:
 
 # Maps real Postgres column names -> short names the frontend already expects.
 # Applied to query results regardless of whether the LLM aliased them itself.
+# Matching is case-insensitive and includes common variant spellings, since the
+# LLM occasionally invents its own alias (e.g. "Latitude", "lng") instead of
+# using the raw column name — this widens the net without pattern-matching on
+# substrings, which would risk false positives on unrelated column names.
 FRIENDLY_COLUMN_NAMES = {
     "latitude": "lat",
+    "lat": "lat",
     "longitude": "lon",
+    "lon": "lon",
+    "lng": "lon",
     "profile_date": "date",
+    "date": "date",
     "pressure_dbar": "depth",
+    "depth": "depth",
     "temperature_c": "temperature",
+    "temperature": "temperature",
     "salinity_psu": "salinity",
+    "salinity": "salinity",
 }
 
 # --- SQL validation ---
@@ -103,9 +114,11 @@ def validate_sql(sql: str) -> None:
 
 
 def rename_to_friendly_columns(df: pd.DataFrame) -> pd.DataFrame:
-    rename_map = {
-        col: FRIENDLY_COLUMN_NAMES[col] for col in df.columns if col in FRIENDLY_COLUMN_NAMES
-    }
+    rename_map = {}
+    for col in df.columns:
+        friendly = FRIENDLY_COLUMN_NAMES.get(col.lower())
+        if friendly:
+            rename_map[col] = friendly
     return df.rename(columns=rename_map)
 
 
@@ -177,6 +190,7 @@ def ask_aquagen(user_question: str) -> dict:
         - For "what is the highest/maximum X" questions, always use SELECT MAX(X) FROM ocean_data.
         - For map or location questions asking for lat/lon, use:
           SELECT DISTINCT latitude, longitude, AVG(temperature_c) AS temperature FROM ocean_data GROUP BY latitude, longitude LIMIT 50
+        - Whenever both latitude and longitude are selected together (for any map-type question), always alias them exactly as "lat" and "lon" — never use other names like "location_lat" or "Latitude".
         - For month-based aggregation, use:
           SELECT to_char(profile_date, 'YYYY-MM') AS month, AVG(temperature_c) AS temperature FROM ocean_data GROUP BY month ORDER BY month
         - Only generate a single SELECT statement. Never use INSERT, UPDATE, DELETE, DROP, or any other data-modifying statement.
