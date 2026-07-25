@@ -12,3 +12,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(health.router)
+app.include_router(ask.router)
+
+
+@app.get("/")
+def root():
+    return {"status": "AquaGen AI is running"}

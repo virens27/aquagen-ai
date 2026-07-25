@@ -2,10 +2,9 @@
 Natural-language -> SQL -> answer pipeline for AquaGen AI.
 
 Moved from root-level query_engine.py into app/services/ as part of the
-Phase 2 layered-architecture cleanup. Logic is unchanged from that version;
-only the location (and import paths) moved. Still queries Supabase Postgres
-directly via Groq — LangChain integration and conversation memory come in
-a later Phase 2 step, on top of this same service.
+Phase 2 layered-architecture cleanup. Both LLM calls (SQL generation and
+result explanation) now go through LangChain's ChatGroq wrapper and
+PromptTemplate, instead of the raw Groq SDK.
 """
 import os
 import re
@@ -13,7 +12,8 @@ import time
 
 import pandas as pd
 from dotenv import load_dotenv
-from groq import Groq
+from langchain_groq import ChatGroq
+from langchain_core.prompts import PromptTemplate
 from sqlalchemy import text
 
 from app.db.session import SessionLocal, engine
@@ -21,7 +21,10 @@ from app.models.query_log import QueryLog
 
 load_dotenv()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    api_key=os.getenv("GROQ_API_KEY"),
+)
 
 # --- Schema description shown to the LLM ---
 SCHEMA_DESCRIPTION = """
@@ -42,7 +45,7 @@ Columns:
 # Applied to query results regardless of whether the LLM aliased them itself.
 # Matching is case-insensitive and includes common variant spellings, since the
 # LLM occasionally invents its own alias (e.g. "Latitude", "lng") instead of
-# using the raw column name — this widens the net without pattern-matching on
+# using the raw column name -- this widens the net without pattern-matching on
 # substrings, which would risk false positives on unrelated column names.
 FRIENDLY_COLUMN_NAMES = {
     "latitude": "lat",
@@ -75,7 +78,7 @@ class UnsafeSQLError(Exception):
 def validate_sql(sql: str) -> None:
     """
     Raises UnsafeSQLError if the SQL isn't a single, plain SELECT statement.
-    This is a defense-in-depth check, not a full SQL parser — it exists to
+    This is a defense-in-depth check, not a full SQL parser -- it exists to
     stop an LLM-generated query from doing anything destructive, not to
     replace proper least-privilege database permissions.
     """
@@ -128,7 +131,7 @@ def log_query(
     error_message: str | None,
     result_row_count: int | None,
 ) -> None:
-    """Best-effort logging — a logging failure should never break the user's response."""
+    """Best-effort logging -- a logging failure should never break the user's response."""
     db = SessionLocal()
     try:
         db.add(
@@ -154,38 +157,36 @@ def ask_aquagen(user_question: str) -> dict:
     sql_query = None
 
     try:
-        # Step 1: Ask LLM to convert question to SQL
-        sql_prompt = f"""
+        # Step 1: Ask LLM to convert question to SQL (via LangChain)
+        sql_prompt_template = PromptTemplate.from_template(
+            """
         You are an ocean data expert. Convert the user's question into a valid PostgreSQL query.
         Only return the SQL query, nothing else. No explanation, no markdown, just raw SQL.
 
         Database schema:
-        {SCHEMA_DESCRIPTION}
+        {schema}
 
-        User question: {user_question}
+        User question: {question}
 
         Important rules:
         - This is PostgreSQL, not SQLite. Use PostgreSQL syntax (e.g. to_char() for date formatting, not strftime()).
-        - For questions asking for maximum, minimum, average, or count values, use MAX(), MIN(), AVG(), COUNT() — do NOT use ORDER BY with LIMIT.
+        - For questions asking for maximum, minimum, average, or count values, use MAX(), MIN(), AVG(), COUNT() -- do NOT use ORDER BY with LIMIT.
         - Only add LIMIT 50 for questions asking to "show", "list", or "display" multiple records.
         - For "what is the highest/maximum X" questions, always use SELECT MAX(X) FROM ocean_data.
         - For map or location questions asking for lat/lon, use:
           SELECT DISTINCT latitude, longitude, AVG(temperature_c) AS temperature FROM ocean_data GROUP BY latitude, longitude LIMIT 50
-        - Whenever both latitude and longitude are selected together (for any map-type question), always alias them exactly as "lat" and "lon" — never use other names like "location_lat" or "Latitude".
+        - Whenever both latitude and longitude are selected together (for any map-type question), always alias them exactly as "lat" and "lon" -- never use other names like "location_lat" or "Latitude".
         - For month-based aggregation, use:
           SELECT to_char(profile_date, 'YYYY-MM') AS month, AVG(temperature_c) AS temperature FROM ocean_data GROUP BY month ORDER BY month
         - Only generate a single SELECT statement. Never use INSERT, UPDATE, DELETE, DROP, or any other data-modifying statement.
 
         SQL query:
         """
-
-        sql_response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": sql_prompt}],
-            max_tokens=300,
         )
 
-        sql_query = sql_response.choices[0].message.content.strip()
+        sql_prompt = sql_prompt_template.format(schema=SCHEMA_DESCRIPTION, question=user_question)
+        sql_response = llm.invoke(sql_prompt)
+        sql_query = sql_response.content.strip()
         # Strip markdown code fences if the model adds them despite instructions
         sql_query = re.sub(r"^```(?:sql)?\s*|\s*```$", "", sql_query, flags=re.IGNORECASE).strip()
         print(f"\nGenerated SQL: {sql_query}")
@@ -202,22 +203,22 @@ def ask_aquagen(user_question: str) -> dict:
                 "explanation": "Sorry, I couldn't process that query. Please try rephrasing your question.",
             }
 
-        # Step 3: Ask LLM to explain the result
-        explain_prompt = f"""
-        The user asked: "{user_question}"
+        # Step 3: Ask LLM to explain the result (via LangChain)
+        explain_prompt_template = PromptTemplate.from_template(
+            """
+        The user asked: "{question}"
         The SQL query returned this data (showing first 20 rows):
-        {result.head(20).to_string()}
+        {data}
 
         Give a clear, friendly 2-3 sentence explanation of what this data means.
         """
-
-        explain_response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": explain_prompt}],
-            max_tokens=200,
         )
 
-        explanation = explain_response.choices[0].message.content.strip()
+        explain_prompt = explain_prompt_template.format(
+            question=user_question, data=result.head(20).to_string()
+        )
+        explain_response = llm.invoke(explain_prompt)
+        explanation = explain_response.content.strip()
 
         execution_time_ms = int((time.monotonic() - start_time) * 1000)
         log_query(user_question, sql_query, execution_time_ms, True, None, len(result))
