@@ -10,9 +10,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
-
 class AskRequest(BaseModel):
     question: str
+    session_id: str | None = None
 
 
 class AskResponse(BaseModel):
@@ -21,3 +21,4 @@ class AskResponse(BaseModel):
     data: list[dict[str, Any]] | None = None
     explanation: str
     error: str | None = None
+    session_id: str | None = None

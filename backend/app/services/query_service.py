@@ -4,11 +4,13 @@ Natural-language -> SQL -> answer pipeline for AquaGen AI.
 Moved from root-level query_engine.py into app/services/ as part of the
 Phase 2 layered-architecture cleanup. Both LLM calls (SQL generation and
 result explanation) now go through LangChain's ChatGroq wrapper and
-PromptTemplate, instead of the raw Groq SDK.
+PromptTemplate, instead of the raw Groq SDK. Also tracks per-session
+conversation history so follow-up questions have context.
 """
 import os
 import re
 import time
+import uuid
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -130,6 +132,7 @@ def log_query(
     success: bool,
     error_message: str | None,
     result_row_count: int | None,
+    session_id: str | None = None,
 ) -> None:
     """Best-effort logging -- a logging failure should never break the user's response."""
     db = SessionLocal()
@@ -142,6 +145,7 @@ def log_query(
                 success=success,
                 error_message=error_message,
                 result_row_count=result_row_count,
+                session_id=session_id,
             )
         )
         db.commit()
@@ -152,12 +156,35 @@ def log_query(
         db.close()
 
 
-def ask_aquagen(user_question: str) -> dict:
+# In-memory store of recent conversation turns, keyed by session_id.
+# Resets on server restart -- acceptable for now; a persistent store
+# (e.g. Redis) would be a future upgrade if this needs to survive restarts.
+conversation_memory: dict[str, list[dict]] = {}
+MAX_HISTORY_TURNS = 3
+
+
+def ask_aquagen(user_question: str, session_id: str | None = None) -> dict:
     start_time = time.monotonic()
     sql_query = None
 
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    history = conversation_memory.get(session_id, [])
+
     try:
         # Step 1: Ask LLM to convert question to SQL (via LangChain)
+        history_context = ""
+        if history:
+            history_lines = "\n".join(
+                f'- Q: "{turn["question"]}" -> SQL: {turn["sql"]}' for turn in history
+            )
+            history_context = f"""
+        Recent questions in this conversation (for context on follow-ups like
+        "what about X instead" or "show that as a map"):
+        {history_lines}
+        """
+
         sql_prompt_template = PromptTemplate.from_template(
             """
         You are an ocean data expert. Convert the user's question into a valid PostgreSQL query.
@@ -165,7 +192,7 @@ def ask_aquagen(user_question: str) -> dict:
 
         Database schema:
         {schema}
-
+        {history_context}
         User question: {question}
 
         Important rules:
@@ -179,12 +206,15 @@ def ask_aquagen(user_question: str) -> dict:
         - For month-based aggregation, use:
           SELECT to_char(profile_date, 'YYYY-MM') AS month, AVG(temperature_c) AS temperature FROM ocean_data GROUP BY month ORDER BY month
         - Only generate a single SELECT statement. Never use INSERT, UPDATE, DELETE, DROP, or any other data-modifying statement.
+        - If the user's question refers back to a previous question (e.g. "what about salinity instead", "show that on a map"), use the conversation context above to understand what they mean, but still generate a complete, standalone SQL query.
 
         SQL query:
         """
         )
 
-        sql_prompt = sql_prompt_template.format(schema=SCHEMA_DESCRIPTION, question=user_question)
+        sql_prompt = sql_prompt_template.format(
+            schema=SCHEMA_DESCRIPTION, question=user_question, history_context=history_context
+        )
         sql_response = llm.invoke(sql_prompt)
         sql_query = sql_response.content.strip()
         # Strip markdown code fences if the model adds them despite instructions
@@ -196,11 +226,12 @@ def ask_aquagen(user_question: str) -> dict:
 
         if isinstance(result, str):
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
-            log_query(user_question, sql_query, execution_time_ms, False, result, None)
+            log_query(user_question, sql_query, execution_time_ms, False, result, None, session_id)
             return {
                 "error": result,
                 "sql": sql_query,
                 "explanation": "Sorry, I couldn't process that query. Please try rephrasing your question.",
+                "session_id": session_id,
             }
 
         # Step 3: Ask LLM to explain the result (via LangChain)
@@ -221,22 +252,28 @@ def ask_aquagen(user_question: str) -> dict:
         explanation = explain_response.content.strip()
 
         execution_time_ms = int((time.monotonic() - start_time) * 1000)
-        log_query(user_question, sql_query, execution_time_ms, True, None, len(result))
+        log_query(user_question, sql_query, execution_time_ms, True, None, len(result), session_id)
+
+        # Remember this turn for follow-up questions in the same session.
+        history.append({"question": user_question, "sql": sql_query})
+        conversation_memory[session_id] = history[-MAX_HISTORY_TURNS:]
 
         return {
             "question": user_question,
             "sql": sql_query,
             "data": result.to_dict(orient="records"),
             "explanation": explanation,
+            "session_id": session_id,
         }
 
     except Exception as e:
         execution_time_ms = int((time.monotonic() - start_time) * 1000)
-        log_query(user_question, sql_query, execution_time_ms, False, str(e), None)
+        log_query(user_question, sql_query, execution_time_ms, False, str(e), None, session_id)
         return {
             "error": str(e),
             "sql": sql_query,
             "explanation": "Something went wrong while processing your question. Please try again.",
+            "session_id": session_id,
         }
 
 
@@ -247,3 +284,4 @@ if __name__ == "__main__":
     result = ask_aquagen(test_question)
     print(f"\nExplanation: {result.get('explanation')}")
     print(f"\nData: {result.get('data', [])[:3]}")
+    print(f"\nSession ID: {result.get('session_id')}")

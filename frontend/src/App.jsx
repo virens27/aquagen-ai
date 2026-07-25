@@ -145,6 +145,7 @@ export default function App() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
 
   const askQuestion = async () => {
     if (!question.trim()) return;
@@ -156,8 +157,15 @@ export default function App() {
     try {
       const response = await axios.post(`${import.meta.env.VITE_API_URL}/ask`, {
         question,
+        session_id: sessionId,
       });
-      const { explanation, data, sql } = response.data;
+      const {
+        explanation,
+        data,
+        sql,
+        session_id: returnedSessionId,
+      } = response.data;
+      if (returnedSessionId) setSessionId(returnedSessionId);
       setMessages((prev) => [
         ...prev,
         { role: "bot", text: explanation, data, sql },

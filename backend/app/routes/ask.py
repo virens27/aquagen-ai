@@ -11,8 +11,7 @@ from app.services.query_service import ask_aquagen
 
 router = APIRouter(tags=["ask"])
 
-
 @router.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest) -> AskResponse:
-    result = ask_aquagen(request.question)
+    result = ask_aquagen(request.question, session_id=request.session_id)
     return AskResponse(**result)
