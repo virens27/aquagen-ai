@@ -1,8 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from query_engine import ask_aquagen
-from app.routes import health
+
+from app.routes import ask, health
 
 app = FastAPI()
 
@@ -14,15 +13,9 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(ask.router)
 
-class Question(BaseModel):
-    question: str
 
 @app.get("/")
 def root():
     return {"status": "AquaGen AI is running"}
-
-@app.post("/ask")
-def ask(q: Question):
-    result = ask_aquagen(q.question)
-    return result

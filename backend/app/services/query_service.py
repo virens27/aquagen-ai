@@ -1,30 +1,11 @@
 """
 Natural-language -> SQL -> answer pipeline for AquaGen AI.
 
-Rewritten for Phase 2: queries Supabase Postgres (ocean_data table) instead
-of the old local SQLite file. Key differences from the original:
-
-1. Uses the app's existing SQLAlchemy engine (app.db.session.engine) rather
-   than sqlite3.connect() — this is the same connection your FastAPI routes
-   already use, so it works identically locally and on Render.
-
-2. The LLM prompt describes the REAL Postgres schema (latitude, longitude,
-   profile_date, temperature_c, salinity_psu, pressure_dbar) instead of the
-   old SQLite column names.
-
-3. Result columns are renamed back to short, frontend-friendly names
-   (lat, lon, date, depth, temperature, salinity) in Python, AFTER the query
-   runs — not by relying on the LLM to alias correctly every time. This is
-   what keeps App.jsx's map/chart rendering working without any frontend
-   changes.
-
-4. Generated SQL is validated before execution: only SELECT statements are
-   allowed, and known-dangerous keywords are blocked. This closes an
-   otherwise-open SQL injection surface (an LLM turning free text into SQL
-   with no guardrails).
-
-5. Every question is logged to query_log (success or failure), matching the
-   schema built in Phase 1.
+Moved from root-level query_engine.py into app/services/ as part of the
+Phase 2 layered-architecture cleanup. Logic is unchanged from that version;
+only the location (and import paths) moved. Still queries Supabase Postgres
+directly via Groq — LangChain integration and conversation memory come in
+a later Phase 2 step, on top of this same service.
 """
 import os
 import re
@@ -258,7 +239,7 @@ def ask_aquagen(user_question: str) -> dict:
         }
 
 
-# Test it
+# Quick manual test: run from backend/ with `python -m app.services.query_service`
 if __name__ == "__main__":
     test_question = "What is the average temperature in the Indian Ocean?"
     print(f"Question: {test_question}")
