@@ -1,6 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import axios from "axios";
 import MapView from "./MapView";
+import Login from "./Login";
+import { supabase } from "./supabaseClient";
+
 import {
   LineChart,
   Line,
@@ -146,6 +149,33 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
+  const [session, setSession] = useState(undefined); // undefined = still checking, null = logged out
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setSession(session);
+      },
+    );
+
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) {
+    return null; // brief loading state while we check for an existing session
+  }
+
+  if (!session) {
+    return <Login />;
+  }
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+  };
 
   const askQuestion = async () => {
     if (!question.trim()) return;
@@ -302,7 +332,22 @@ export default function App() {
         </div>
 
         {/* Stats inline in header */}
-        <div style={{ display: "flex", gap: "32px" }}>
+        <div style={{ display: "flex", gap: "24px", alignItems: "center" }}>
+          <button
+            onClick={handleSignOut}
+            style={{
+              padding: "7px 14px",
+              background: "#F5F8FA",
+              color: "#888",
+              border: "1px solid #E0EEF5",
+              borderRadius: "8px",
+              fontSize: "0.8rem",
+              cursor: "pointer",
+              fontWeight: "500",
+            }}
+          >
+            Sign Out
+          </button>
           {stats.map((s) => (
             <div
               key={s.label}
